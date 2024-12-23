@@ -10,10 +10,17 @@
     - group RBAC
 * pod specifications
     - app deployment
+        + pods
+        + repilicaSets
+        + deployment
+    - namespaces
+    - cluster contexts
     - app deployment to specific node (NodeSelector)
     - NodeSelector based on env
+    - pod nodeSelector (admission control plugin) 
     - deamonSet
     - jobs & cronJobs
+    - delete jobs when complete using a feature gate (TTLafterFinished)
     - init containers
 * configuration resources
     - secrets

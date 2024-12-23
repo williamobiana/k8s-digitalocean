@@ -1,0 +1,21 @@
+# kube-config file template
+
+apiVersion: v1
+kind: configuration
+users:
+- name: kind-user
+  user:
+    client-certificate-data: some-data
+    client-key-data: some-data
+clusters:
+- name: kind-cluster
+  cluster:
+    certificate-authority-data: some-data
+    server: some-data
+contexts:
+- name: kind-context
+  context:
+    user: {user name from users}
+    cluster: {cluster name from clusters}
+current-context: {context name from contexts}
+preferences: {}
