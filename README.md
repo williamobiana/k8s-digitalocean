@@ -3,6 +3,7 @@
 * orchestrate a cluster
     - kind
     - metallb for loadbalancer
+    - kind working with mulitple clusters
 * authorization & permissions
     - RBAC
     - kube config
