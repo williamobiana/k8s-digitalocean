@@ -1,5 +1,4 @@
 # kube-config file template
-
 apiVersion: v1
 kind: configuration
 users:
