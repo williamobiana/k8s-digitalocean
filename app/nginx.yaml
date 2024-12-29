@@ -4,6 +4,7 @@ metadata:
   labels:
     app: nginx
   name: nginx
+  namespace: application
 spec:
   replicas: 2
   selector:
@@ -24,7 +25,7 @@ metadata:
   labels:
     app: nginx
   name: nginx
-  namespace: default
+  namespace: application
 spec:
   ports:
   - port: 80
