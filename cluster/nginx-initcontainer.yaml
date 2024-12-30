@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: nginx
+  name: nginx
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      volumes:
+      - name: nginx-shared-volume
+        emptyDir: {}
+
+      initContainers:
+      - name: busybox
+        image: busybox
+        volumeMounts:
+        - name: nginx-shared-volume
+          mountPath: /nginx-data
+        command: ["bin/sh"]
+        args: ["-c", "echo '<h1>Hello World</h1>' > /nginx-data/index.html"]
+
+      containers:
+      - name: nginx
+        image: nginx
+        volumeMounts:
+        - name: nginx-shared-volume
+          mountPath: /usr/share/nginx/html
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: nginx
+  name: nginx
+spec:
+  ports:
+  - port: 80
+    protocol: TCP
+    targetPort: 80
+  selector:
+    app: nginx
+  type: LoadBalancer
