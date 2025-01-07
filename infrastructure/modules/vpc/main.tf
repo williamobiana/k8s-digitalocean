@@ -11,6 +11,7 @@ resource "aws_vpc" "main" {
 # use data source to get all avalablility zones in region
 data "aws_availability_zones" "available" {}
 
+# public subnet
 resource "aws_subnet" "public" {
   count                   = 2
   vpc_id                  = aws_vpc.main.id
@@ -23,6 +24,7 @@ resource "aws_subnet" "public" {
   }
 }
 
+# private subnet
 resource "aws_subnet" "private" {
   count             = 2
   vpc_id            = aws_vpc.main.id
@@ -34,6 +36,7 @@ resource "aws_subnet" "private" {
   }
 }
 
+# internet gateway
 resource "aws_internet_gateway" "main" {
   vpc_id = aws_vpc.main.id
 
@@ -42,6 +45,7 @@ resource "aws_internet_gateway" "main" {
   }
 }
 
+# elastic IP
 resource "aws_eip" "nat" {
   domain = "vpc"
 
@@ -50,6 +54,7 @@ resource "aws_eip" "nat" {
   }
 }
 
+# nat gateway
 resource "aws_nat_gateway" "main" {
   allocation_id = aws_eip.nat.id
   subnet_id     = aws_subnet.public[0].id
@@ -59,6 +64,7 @@ resource "aws_nat_gateway" "main" {
   }
 }
 
+# public route table
 resource "aws_route_table" "public" {
   vpc_id = aws_vpc.main.id
 
@@ -72,6 +78,7 @@ resource "aws_route_table" "public" {
   }
 }
 
+# private route table
 resource "aws_route_table" "private" {
   vpc_id = aws_vpc.main.id
 
@@ -85,12 +92,14 @@ resource "aws_route_table" "private" {
   }
 }
 
+# public route table association
 resource "aws_route_table_association" "public" {
   count          = 2
   subnet_id      = aws_subnet.public[count.index].id
   route_table_id = aws_route_table.public.id
 }
 
+# private route table association
 resource "aws_route_table_association" "private" {
   count          = 2
   subnet_id      = aws_subnet.private[count.index].id
