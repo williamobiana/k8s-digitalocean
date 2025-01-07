@@ -1,3 +1,21 @@
+provider "helm" {
+  kubernetes {
+    host                   = module.eks.cluster_endpoint
+    cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority_data)
+
+    exec {
+      api_version = "client.authentication.k8s.io/v1beta1"
+      command     = "aws"
+      # This requires the awscli to be installed locally where Terraform is executed
+      args = ["eks", "get-token", "--cluster-name", module.eks.cluster_name]
+    }
+  }
+}
+
+data "aws_ecrpublic_authorization_token" "token" {
+  provider = aws
+}
+
 locals {
   vpc_id = module.vpc.vpc_id
   vpc_cidr_block = module.vpc.vpc_cidr_block
@@ -66,13 +84,29 @@ module "eks" {
   # Karpenter Managed Node Group(s) Settings
   eks_managed_node_groups = {
     karpenter = {
+      ami_type       = "BOTTLEROCKET_x86_64"
       instance_types = ["t3.small"]
+
+      capacity_type  = "SPOT"
+      iam_role_attach_cni_policy = true
 
       min_size     = 1
       max_size     = 3
       desired_size = 2
+
+      labels = {
+        # Used to ensure Karpenter runs on nodes that it does not manage
+        "karpenter.sh/controller" = "true"
+      }
     }
   }
+
+  node_security_group_tags = merge(local.common_tags, {
+    # NOTE - if creating multiple security groups with this module, only tag the
+    # security group that Karpenter should utilize with the following tag
+    # (i.e. - at most, only one security group should have this tag in your account)
+    "karpenter.sh/discovery" = "karpenter"
+  })
 
   # Add some cluster add-ons
   cluster_addons = {
@@ -96,14 +130,39 @@ module "eks" {
   tags = local.common_tags
 }
 
-module "karpenter" {
-  source  = "terraform-aws-modules/eks/aws//modules/karpenter"
+#module "karpenter" {
+#  source  = "terraform-aws-modules/eks/aws//modules/karpenter"
+#
+#  cluster_name = module.eks.cluster_name
+#
+#  create_node_iam_role = false
+#  node_iam_role_arn    = module.eks.eks_managed_node_groups["karpenter"].iam_role_arn
+#  create_access_entry = false
+#
+#  tags = local.common_tags
+#}
+#
 
-  cluster_name = module.eks.cluster_name
+resource "helm_release" "karpenter" {
+  namespace           = "kube-system"
+  name                = "karpenter"
+  repository          = "oci://public.ecr.aws/karpenter"
+  repository_username = data.aws_ecrpublic_authorization_token.token.user_name
+  repository_password = data.aws_ecrpublic_authorization_token.token.password
+  chart               = "karpenter"
+  version             = "1.1.1"
+  wait                = false
 
-  create_node_iam_role = false
-  node_iam_role_arn    = module.eks.eks_managed_node_groups["karpenter"].iam_role_arn
-  create_access_entry = false
-
-  tags = local.common_tags
+  values = [
+    <<-EOT
+    nodeSelector:
+      karpenter.sh/controller: 'true'
+    dnsPolicy: Default
+    settings:
+      clusterName: ${module.eks.cluster_name}
+      clusterEndpoint: ${module.eks.cluster_endpoint}
+    webhook:
+      enabled: false
+    EOT
+  ]
 }

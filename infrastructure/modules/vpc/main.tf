@@ -20,7 +20,8 @@ resource "aws_subnet" "public" {
   map_public_ip_on_launch = true
 
   tags = {
-    Name = "Public Subnet ${count.index + 1}"
+    Name  = "Public Subnet ${count.index + 1}"
+    "kubernetes.io/role/elb" = 1
   }
 }
 
@@ -33,6 +34,8 @@ resource "aws_subnet" "private" {
 
   tags = {
     Name = "Private Subnet ${count.index + 1}"
+    "kubernetes.io/role/internal-elb" = 1
+    "karpenter.sh/discovery" = "karpenter"
   }
 }
 
