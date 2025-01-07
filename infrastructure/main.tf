@@ -1,3 +1,7 @@
+provider "aws" {
+  region = "us-east-1"
+}
+
 provider "helm" {
   kubernetes {
     host                   = module.eks.cluster_endpoint
@@ -17,6 +21,7 @@ data "aws_ecrpublic_authorization_token" "token" {
 }
 
 locals {
+  name = "my-eks-cluster"
   vpc_id = module.vpc.vpc_id
   vpc_cidr_block = module.vpc.vpc_cidr_block
   public_subnet_ids = module.vpc.public_subnet_ids
@@ -34,31 +39,31 @@ module "vpc" {
 }
 
 
-module "vpc_cni_irsa" {
-  source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
-  version = "~> 5.0"  # Use the latest 5.x version
-
-  role_name = "vpc-cni-irsa"
-
-  attach_vpc_cni_policy = true
-  vpc_cni_enable_ipv4   = true
-
-  oidc_providers = {
-    main = {
-      provider_arn               = module.eks.oidc_provider_arn
-      namespace_service_accounts = ["kube-system:aws-node"]
-    }
-  }
-
-  tags = local.common_tags
-}
+#module "vpc_cni_irsa" {
+#  source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
+#  version = "~> 5.0"  # Use the latest 5.x version
+#
+#  role_name = "vpc-cni-irsa"
+#
+#  attach_vpc_cni_policy = true
+#  vpc_cni_enable_ipv4   = true
+#
+#  oidc_providers = {
+#    main = {
+#      provider_arn               = module.eks.oidc_provider_arn
+#      namespace_service_accounts = ["kube-system:aws-node"]
+#    }
+#  }
+#
+#  tags = local.common_tags
+#}
 
 
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
   version = "~> 20.0"  # Use the latest 19.x version
 
-  cluster_name    = "my-eks-cluster"
+  cluster_name    = local.name
   cluster_version = "1.27"  # Specify the Kubernetes version you want to use
   cluster_endpoint_public_access = true
   enable_cluster_creator_admin_permissions = true
@@ -91,8 +96,8 @@ module "eks" {
       iam_role_attach_cni_policy = true
 
       min_size     = 1
-      max_size     = 3
-      desired_size = 2
+      max_size     = 2
+      desired_size = 1
 
       labels = {
         # Used to ensure Karpenter runs on nodes that it does not manage
@@ -105,27 +110,34 @@ module "eks" {
     # NOTE - if creating multiple security groups with this module, only tag the
     # security group that Karpenter should utilize with the following tag
     # (i.e. - at most, only one security group should have this tag in your account)
-    "karpenter.sh/discovery" = "karpenter"
+    "karpenter.sh/discovery" = local.name
   })
 
-  # Add some cluster add-ons
   cluster_addons = {
-    kube-proxy = {
-      most_recent = true
-    }
-    vpc-cni = {
-      most_recent              = true
-      before_compute           = true
-      service_account_role_arn = module.vpc_cni_irsa.iam_role_arn
-      configuration_values = jsonencode({
-        env = {
-          # Reference docs https://docs.aws.amazon.com/eks/latest/userguide/cni-increase-ip-addresses.html
-          ENABLE_PREFIX_DELEGATION = "true"
-          WARM_PREFIX_TARGET       = "1"
-        }
-      })
-    }
+    coredns                = {}
+    eks-pod-identity-agent = {}
+    kube-proxy             = {}
+    vpc-cni                = {}
   }
+
+  # Add some cluster add-ons
+  # cluster_addons = {
+  #   kube-proxy = {
+  #     most_recent = true
+  #   }
+  #   vpc-cni = {
+  #     most_recent              = true
+  #     before_compute           = true
+  #     service_account_role_arn = module.vpc_cni_irsa.iam_role_arn
+  #     configuration_values = jsonencode({
+  #       env = {
+  #         # Reference docs https://docs.aws.amazon.com/eks/latest/userguide/cni-increase-ip-addresses.html
+  #         ENABLE_PREFIX_DELEGATION = "true"
+  #         WARM_PREFIX_TARGET       = "1"
+  #       }
+  #     })
+  #   }
+  # }
 
   tags = local.common_tags
 }
@@ -142,6 +154,27 @@ module "eks" {
 #  tags = local.common_tags
 #}
 #
+
+
+module "karpenter" {
+  source = "terraform-aws-modules/eks/aws//modules/karpenter"
+
+  cluster_name          = module.eks.cluster_name
+  enable_v1_permissions = true
+
+  # Name needs to match role name passed to the EC2NodeClass
+  node_iam_role_use_name_prefix   = false
+  node_iam_role_name              = local.name
+  create_pod_identity_association = true
+
+  # Used to attach additional IAM policies to the Karpenter node IAM role
+  node_iam_role_additional_policies = {
+    AmazonSSMManagedInstanceCore = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+  }
+
+  tags = local.common_tags
+}
+
 
 resource "helm_release" "karpenter" {
   namespace           = "kube-system"
@@ -161,6 +194,7 @@ resource "helm_release" "karpenter" {
     settings:
       clusterName: ${module.eks.cluster_name}
       clusterEndpoint: ${module.eks.cluster_endpoint}
+      interruptionQueue: ${module.karpenter.queue_name}
     webhook:
       enabled: false
     EOT
