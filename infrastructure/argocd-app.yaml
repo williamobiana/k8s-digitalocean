@@ -6,11 +6,11 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: 'https://github.com/williamobiana/k8s-digitalocean.git'
+    repoURL: https://github.com/williamobiana/k8s-digitalocean.git
     targetRevision: HEAD 
-    path: 'app'
+    path: app
   destination:
-    server: 'https://kubernetes.default.svc'
+    server: https://kubernetes.default.svc
     namespace: default
   syncPolicy:
     #automated:
