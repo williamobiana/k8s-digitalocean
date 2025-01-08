@@ -45,3 +45,9 @@
 * gitops argoCD
     - argoCD deployment
     - argoCD configuration (UI & CLI)
+
+
+
+
+cd infrastructure
+kubectl apply -f argocd-app.yaml 
