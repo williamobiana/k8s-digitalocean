@@ -48,6 +48,25 @@
 
 
 
-
-cd infrastructure
+aws eks update-kubeconfig --name ex-infrastructure
+kubectl apply -f karpenter.yaml
+kubectl logs -f -n kube-system -l app.kubernetes.io/name=karpenter -c controller
+kubectl get nodes -L karpenter.sh/registered
+kubectl get pods -A -o custom-columns=NAME:.metadata.name,NODE:.spec.nodeName
+kubectl get svc
+kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d
 kubectl apply -f argocd-app.yaml 
+
+
+
+Add this resource policies to delete the resources on uninstall
+customResourceDefinitions:
+  applications.argoproj.io:
+    resource:
+      policy: delete
+  applicationsets.argoproj.io:
+    resource:
+      policy: delete
+  appprojects.argoproj.io:
+    resource:
+      policy: delete
