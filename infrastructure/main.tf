@@ -42,6 +42,40 @@ locals {
   }
 }
 
+
+################################################################################
+# VPC
+################################################################################
+
+module "vpc" {
+  source  = "terraform-aws-modules/vpc/aws"
+  version = "~> 5.0"
+
+  name = local.name
+  cidr = local.vpc_cidr
+
+  azs             = local.azs
+  private_subnets = [for k, v in local.azs : cidrsubnet(local.vpc_cidr, 4, k)]
+  public_subnets  = [for k, v in local.azs : cidrsubnet(local.vpc_cidr, 8, k + 48)]
+  intra_subnets   = [for k, v in local.azs : cidrsubnet(local.vpc_cidr, 8, k + 52)]
+
+  enable_nat_gateway = true
+  single_nat_gateway = true
+
+  public_subnet_tags = {
+    "kubernetes.io/role/elb" = 1
+  }
+
+  private_subnet_tags = {
+    "kubernetes.io/role/internal-elb" = 1
+    # Tags subnets for Karpenter auto-discovery
+    "karpenter.sh/discovery" = local.name
+  }
+
+  tags = local.tags
+}
+
+
 ################################################################################
 # EKS Module
 ################################################################################
@@ -57,6 +91,7 @@ module "eks" {
   enable_cluster_creator_admin_permissions = true
   cluster_endpoint_public_access           = true
 
+  # Cluster Addons
   cluster_addons = {
     coredns                = {}
     eks-pod-identity-agent = {}
@@ -64,10 +99,12 @@ module "eks" {
     vpc-cni                = {}
   }
 
+  # Network
   vpc_id                   = module.vpc.vpc_id
   subnet_ids               = module.vpc.private_subnets
   control_plane_subnet_ids = module.vpc.intra_subnets
 
+  # Node Groups
   eks_managed_node_groups = {
     karpenter = {
       ami_type       = "BOTTLEROCKET_x86_64"
@@ -83,7 +120,8 @@ module "eks" {
       }
     }
   }
-
+ 
+  # Node Security Group
   node_security_group_tags = merge(local.tags, {
     # NOTE - if creating multiple security groups with this module, only tag the
     # security group that Karpenter should utilize with the following tag
@@ -125,7 +163,6 @@ module "karpenter_disabled" {
 
 ################################################################################
 # Karpenter Helm chart & manifests
-# Not required; just to demonstrate functionality of the sub-module
 ################################################################################
 
 resource "helm_release" "karpenter" {
@@ -154,33 +191,25 @@ resource "helm_release" "karpenter" {
 }
 
 ################################################################################
-# Supporting Resources
+# Argo CD Helm chart & manifests
 ################################################################################
 
-module "vpc" {
-  source  = "terraform-aws-modules/vpc/aws"
-  version = "~> 5.0"
+resource "helm_release" "argocd" {
+  depends_on = [module.eks.eks_managed_node_groups]
+  name       = "argocd"
+  repository = "https://argoproj.github.io/argo-helm"
+  chart      = "argo-cd"
+  version    = "7.4.5"
+  namespace  = "argocd"
+  create_namespace = true
 
-  name = local.name
-  cidr = local.vpc_cidr
-
-  azs             = local.azs
-  private_subnets = [for k, v in local.azs : cidrsubnet(local.vpc_cidr, 4, k)]
-  public_subnets  = [for k, v in local.azs : cidrsubnet(local.vpc_cidr, 8, k + 48)]
-  intra_subnets   = [for k, v in local.azs : cidrsubnet(local.vpc_cidr, 8, k + 52)]
-
-  enable_nat_gateway = true
-  single_nat_gateway = true
-
-  public_subnet_tags = {
-    "kubernetes.io/role/elb" = 1
-  }
-
-  private_subnet_tags = {
-    "kubernetes.io/role/internal-elb" = 1
-    # Tags subnets for Karpenter auto-discovery
-    "karpenter.sh/discovery" = local.name
-  }
-
-  tags = local.tags
+  values = [
+    <<-EOT
+    server:
+      service:
+        type: LoadBalancer
+        annotations:
+          service.beta.kubernetes.io/aws-load-balancer-type: nlb
+    EOT
+  ]
 }
