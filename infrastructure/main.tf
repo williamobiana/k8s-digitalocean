@@ -194,22 +194,22 @@ resource "helm_release" "karpenter" {
 # Argo CD Helm chart & manifests
 ################################################################################
 
-resource "helm_release" "argocd" {
-  depends_on = [module.eks.eks_managed_node_groups]
-  name       = "argocd"
-  repository = "https://argoproj.github.io/argo-helm"
-  chart      = "argo-cd"
-  version    = "7.4.5"
-  namespace  = "argocd"
-  create_namespace = true
-
-  values = [
-    <<-EOT
-    server:
-      service:
-        type: LoadBalancer
-        annotations:
-          service.beta.kubernetes.io/aws-load-balancer-type: nlb
-    EOT
-  ]
-}
+#resource "helm_release" "argocd" {
+#  depends_on = [module.eks.eks_managed_node_groups]
+#  name       = "argocd"
+#  repository = "https://argoproj.github.io/argo-helm"
+#  chart      = "argo-cd"
+#  version    = "7.4.5"
+#  namespace  = "argocd"
+#  create_namespace = true
+#
+#  values = [
+#    <<-EOT
+#    server:
+#      service:
+#        type: LoadBalancer
+#        annotations:
+#          service.beta.kubernetes.io/aws-load-balancer-type: nlb
+#    EOT
+#  ]
+#}
