@@ -2,6 +2,18 @@ provider "aws" {
   region = local.region
 }
 
+provider "kubernetes" {
+  host                   = module.eks.cluster_endpoint
+  cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority_data)
+
+  exec {
+    api_version = "client.authentication.k8s.io/v1beta1"
+    command     = "aws"
+    # This requires the awscli to be installed locally where Terraform is executed
+    args = ["eks", "get-token", "--cluster-name", module.eks.cluster_name]
+  }
+}
+
 provider "helm" {
   kubernetes {
     host                   = module.eks.cluster_endpoint
@@ -17,34 +29,167 @@ provider "helm" {
 }
 
 data "aws_availability_zones" "available" {
-  # Exclude local zones
+  # Do not include local zones
   filter {
     name   = "opt-in-status"
     values = ["opt-in-not-required"]
   }
 }
 
-data "aws_ecrpublic_authorization_token" "token" {
-  provider = aws
-}
-
 locals {
-  name   = "ex-${basename(path.cwd)}"
+  name   = basename(path.cwd)
   region = "us-east-1"
 
   vpc_cidr = "10.0.0.0/16"
   azs      = slice(data.aws_availability_zones.available.names, 0, 3)
 
+  istio_chart_url     = "https://istio-release.storage.googleapis.com/charts"
+  istio_chart_version = "1.20.2"
+
   tags = {
-    Example    = local.name
-    GithubRepo = "terraform-aws-eks"
-    GithubOrg  = "terraform-aws-modules"
+    Blueprint  = local.name
+    GithubRepo = "github.com/aws-ia/terraform-aws-eks-blueprints"
   }
 }
 
+################################################################################
+# Cluster
+################################################################################
+
+module "eks" {
+  source  = "terraform-aws-modules/eks/aws"
+  version = "~> 20.11"
+
+  cluster_name                   = local.name
+  cluster_version                = "1.30"
+  cluster_endpoint_public_access = true
+
+  # Give the Terraform identity admin access to the cluster
+  # which will allow resources to be deployed into the cluster
+  enable_cluster_creator_admin_permissions = true
+
+  cluster_addons = {
+    coredns    = {}
+    kube-proxy = {}
+    vpc-cni    = {}
+  }
+
+  vpc_id     = module.vpc.vpc_id
+  subnet_ids = module.vpc.private_subnets
+
+  eks_managed_node_groups = {
+    initial = {
+      instance_types = ["m5.large"]
+
+      min_size     = 1
+      max_size     = 5
+      desired_size = 2
+    }
+  }
+
+  #  EKS K8s API cluster needs to be able to talk with the EKS worker nodes with port 15017/TCP and 15012/TCP which is used by Istio
+  #  Istio in order to create sidecar needs to be able to communicate with webhook and for that network passage to EKS is needed.
+  node_security_group_additional_rules = {
+    ingress_15017 = {
+      description                   = "Cluster API - Istio Webhook namespace.sidecar-injector.istio.io"
+      protocol                      = "TCP"
+      from_port                     = 15017
+      to_port                       = 15017
+      type                          = "ingress"
+      source_cluster_security_group = true
+    }
+    ingress_15012 = {
+      description                   = "Cluster API to nodes ports/protocols"
+      protocol                      = "TCP"
+      from_port                     = 15012
+      to_port                       = 15012
+      type                          = "ingress"
+      source_cluster_security_group = true
+    }
+  }
+
+  tags = local.tags
+}
 
 ################################################################################
-# VPC
+# EKS Blueprints Addons
+################################################################################
+
+resource "kubernetes_namespace_v1" "istio_system" {
+  metadata {
+    name = "istio-system"
+  }
+}
+
+module "eks_blueprints_addons" {
+  source  = "aws-ia/eks-blueprints-addons/aws"
+  version = "~> 1.16"
+
+  cluster_name      = module.eks.cluster_name
+  cluster_endpoint  = module.eks.cluster_endpoint
+  cluster_version   = module.eks.cluster_version
+  oidc_provider_arn = module.eks.oidc_provider_arn
+
+  # This is required to expose Istio Ingress Gateway
+  enable_aws_load_balancer_controller = true
+
+  helm_releases = {
+    istio-base = {
+      chart         = "base"
+      chart_version = local.istio_chart_version
+      repository    = local.istio_chart_url
+      name          = "istio-base"
+      namespace     = kubernetes_namespace_v1.istio_system.metadata[0].name
+    }
+
+    istiod = {
+      chart         = "istiod"
+      chart_version = local.istio_chart_version
+      repository    = local.istio_chart_url
+      name          = "istiod"
+      namespace     = kubernetes_namespace_v1.istio_system.metadata[0].name
+
+      set = [
+        {
+          name  = "meshConfig.accessLogFile"
+          value = "/dev/stdout"
+        }
+      ]
+    }
+
+    istio-ingress = {
+      chart            = "gateway"
+      chart_version    = local.istio_chart_version
+      repository       = local.istio_chart_url
+      name             = "istio-ingress"
+      namespace        = "istio-ingress" # per https://github.com/istio/istio/blob/master/manifests/charts/gateways/istio-ingress/values.yaml#L2
+      create_namespace = true
+
+      values = [
+        yamlencode(
+          {
+            labels = {
+              istio = "ingressgateway"
+            }
+            service = {
+              annotations = {
+                "service.beta.kubernetes.io/aws-load-balancer-type"            = "external"
+                "service.beta.kubernetes.io/aws-load-balancer-nlb-target-type" = "ip"
+                "service.beta.kubernetes.io/aws-load-balancer-scheme"          = "internet-facing"
+                "service.beta.kubernetes.io/aws-load-balancer-attributes"      = "load_balancing.cross_zone.enabled=true"
+              }
+            }
+          }
+        )
+      ]
+    }
+  }
+
+  tags = local.tags
+}
+
+################################################################################
+# Supporting Resources
 ################################################################################
 
 module "vpc" {
@@ -57,7 +202,6 @@ module "vpc" {
   azs             = local.azs
   private_subnets = [for k, v in local.azs : cidrsubnet(local.vpc_cidr, 4, k)]
   public_subnets  = [for k, v in local.azs : cidrsubnet(local.vpc_cidr, 8, k + 48)]
-  intra_subnets   = [for k, v in local.azs : cidrsubnet(local.vpc_cidr, 8, k + 52)]
 
   enable_nat_gateway = true
   single_nat_gateway = true
@@ -68,148 +212,12 @@ module "vpc" {
 
   private_subnet_tags = {
     "kubernetes.io/role/internal-elb" = 1
-    # Tags subnets for Karpenter auto-discovery
-    "karpenter.sh/discovery" = local.name
   }
 
   tags = local.tags
 }
 
-
-################################################################################
-# EKS Module
-################################################################################
-
-module "eks" {
-  source = "github.com/terraform-aws-modules/terraform-aws-eks"
-
-  cluster_name    = local.name
-  cluster_version = "1.31"
-
-  # Gives Terraform identity admin access to cluster which will
-  # allow deploying resources (Karpenter) into the cluster
-  enable_cluster_creator_admin_permissions = true
-  cluster_endpoint_public_access           = true
-
-  # Cluster Addons
-  cluster_addons = {
-    coredns                = {}
-    eks-pod-identity-agent = {}
-    kube-proxy             = {}
-    vpc-cni                = {}
-  }
-
-  # Network
-  vpc_id                   = module.vpc.vpc_id
-  subnet_ids               = module.vpc.private_subnets
-  control_plane_subnet_ids = module.vpc.intra_subnets
-
-  # Node Groups
-  eks_managed_node_groups = {
-    karpenter = {
-      ami_type       = "BOTTLEROCKET_x86_64"
-      instance_types = ["t2.small"]
-
-      min_size     = 2
-      max_size     = 3
-      desired_size = 2
-
-      labels = {
-        # Used to ensure Karpenter runs on nodes that it does not manage
-        "karpenter.sh/controller" = "true"
-      }
-    }
-  }
- 
-  # Node Security Group
-  node_security_group_tags = merge(local.tags, {
-    # NOTE - if creating multiple security groups with this module, only tag the
-    # security group that Karpenter should utilize with the following tag
-    # (i.e. - at most, only one security group should have this tag in your account)
-    "karpenter.sh/discovery" = local.name
-  })
-
-  tags = local.tags
+output "configure_kubectl" {
+  description = "Configure kubectl: make sure you're logged in with the correct AWS profile and run the following command to update your kubeconfig"
+  value       = "aws eks --region ${local.region} update-kubeconfig --name ${module.eks.cluster_name}"
 }
-
-################################################################################
-# Karpenter
-################################################################################
-
-module "karpenter" {
-  source = "terraform-aws-modules/eks/aws//modules/karpenter"
-
-  cluster_name          = module.eks.cluster_name
-  enable_v1_permissions = true
-
-  # Name needs to match role name passed to the EC2NodeClass
-  node_iam_role_use_name_prefix   = false
-  node_iam_role_name              = local.name
-  create_pod_identity_association = true
-
-  # Used to attach additional IAM policies to the Karpenter node IAM role
-  node_iam_role_additional_policies = {
-    AmazonSSMManagedInstanceCore = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
-  }
-
-  tags = local.tags
-}
-
-module "karpenter_disabled" {
-  source = "terraform-aws-modules/eks/aws//modules/karpenter"
-
-  create = false
-}
-
-################################################################################
-# Karpenter Helm chart & manifests
-################################################################################
-
-resource "helm_release" "karpenter" {
-  namespace           = "kube-system"
-  name                = "karpenter"
-  repository          = "oci://public.ecr.aws/karpenter"
-  repository_username = data.aws_ecrpublic_authorization_token.token.user_name
-  repository_password = data.aws_ecrpublic_authorization_token.token.password
-  chart               = "karpenter"
-  version             = "1.1.1"
-  wait                = false
-
-  values = [
-    <<-EOT
-    nodeSelector:
-      karpenter.sh/controller: 'true'
-    dnsPolicy: Default
-    settings:
-      clusterName: ${module.eks.cluster_name}
-      clusterEndpoint: ${module.eks.cluster_endpoint}
-      interruptionQueue: ${module.karpenter.queue_name}
-    webhook:
-      enabled: false
-    EOT
-  ]
-}
-
-################################################################################
-# Argo CD Helm chart & manifests
-################################################################################
-
-#resource "helm_release" "argocd" {
-#  depends_on = [module.eks.eks_managed_node_groups]
-#  name       = "argocd"
-#  repository = "https://argoproj.github.io/argo-helm"
-#  chart      = "argo-cd"
-#  version    = "7.4.5"
-#  namespace  = "argocd"
-#  create_namespace = true
-#
-#  values = [
-#    <<-EOT
-#    server:
-#      service:
-#        type: LoadBalancer
-#        annotations:
-#          service.beta.kubernetes.io/aws-load-balancer-type: nlb
-#    EOT
-#  ]
-#}
